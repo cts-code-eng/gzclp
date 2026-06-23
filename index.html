@@ -259,8 +259,8 @@ body.timer-on { padding-top: 62px; }
 <script>
 // ── SUPABASE CONFIG ───────────────────────────────────────
 // Fill in your values from: supabase.com → project → Settings → API
-const SUPABASE_URL      = 'YOUR_SUPABASE_URL';
-const SUPABASE_ANON_KEY = 'YOUR_SUPABASE_ANON_KEY';
+const SUPABASE_URL      = 'https://hwkvuoygxzbvvoljqxqe.supabase.co';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imh3a3Z1b3lneHpidnZvbGpxeHFlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODIyMDM4MzQsImV4cCI6MjA5Nzc3OTgzNH0.U1lCnK77ucrTd5MzGL6TPe9lldCVwRlX759bK02gpEQ';
 let sb = null, currentUser = null, loginMode = 'login';
 try { if (typeof supabase!=='undefined' && SUPABASE_URL!=='YOUR_SUPABASE_URL') sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY); } catch(e) {}
 
