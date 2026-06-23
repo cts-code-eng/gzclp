@@ -233,7 +233,12 @@ body.timer-on { padding-top: 62px; }
 .summary-ex-sets { font-size: 13px; color: var(--muted); letter-spacing: .02em; margin-bottom: 4px; }
 .rec-badges { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .rec-badge { font-size: 12px; font-weight: 600; background: var(--card2); border-radius: 8px; padding: 4px 9px; }
+/* CLOUD */
+.cloud-loading { display:flex; flex-direction:column; align-items:center; justify-content:center; height:100vh; gap:14px; color:var(--muted); font-size:14px; }
+.spinner { width:30px; height:30px; border:3px solid var(--border); border-top-color:var(--accent); border-radius:50%; animation:spin .8s linear infinite; }
+@keyframes spin { to { transform:rotate(360deg); } }
 </style>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
 </head>
 <body>
 <div id="timer-bar" class="timer-bar">
@@ -248,6 +253,13 @@ body.timer-on { padding-top: 62px; }
 <div class="toast" id="toast"></div>
 
 <script>
+// ── SUPABASE CONFIG ───────────────────────────────────────
+// Fill in your values from: supabase.com → project → Settings → API
+const SUPABASE_URL      = 'YOUR_SUPABASE_URL';
+const SUPABASE_ANON_KEY = 'YOUR_SUPABASE_ANON_KEY';
+let sb = null, currentUser = null, loginMode = 'login';
+try { if (typeof supabase!=='undefined' && SUPABASE_URL!=='YOUR_SUPABASE_URL') sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY); } catch(e) {}
+
 // ── EXERCISE LIBRARY ──────────────────────────────────────
 const EXERCISES = [
   { id:'assistedpullup',  name:'Assisted Pull Up',           incKg:2.5,  incLbs:5,   wt:{t1:40,t2:30,t3:20} },
@@ -345,7 +357,60 @@ let state = (() => {
   return defaultState();
 })();
 
-function saveState() { localStorage.setItem('gzclp_v3', JSON.stringify(state)); }
+function saveState() {
+  localStorage.setItem('gzclp_v3', JSON.stringify(state));
+  syncToCloud();
+}
+
+async function syncToCloud() {
+  if (!sb || !currentUser) return;
+  try {
+    await sb.from('gzclp_data').upsert(
+      { user_id: currentUser.id, data: JSON.parse(JSON.stringify(state)), updated_at: new Date().toISOString() },
+      { onConflict: 'user_id' }
+    );
+  } catch(e) {}
+}
+
+async function loadFromCloud() {
+  if (!sb || !currentUser) return;
+  try {
+    const { data, error } = await sb.from('gzclp_data')
+      .select('data').eq('user_id', currentUser.id).single();
+    if (error || !data) { syncToCloud(); return; }
+    const cloud = data.data;
+    if (cloud?.sessions?.length > 0) {
+      state = cloud;
+      localStorage.setItem('gzclp_v3', JSON.stringify(state));
+      render();
+    } else if (state.sessions?.length > 0) {
+      await syncToCloud();
+      showToast('Data backed up to cloud ☁️');
+    }
+  } catch(e) {}
+}
+
+async function initAuth() {
+  if (!sb) { render(); return; }
+  document.getElementById('app').innerHTML = '<div class="cloud-loading"><div class="spinner"></div><div>Loading…</div></div>';
+  sb.auth.onAuthStateChange(async (event, session) => {
+    currentUser = session?.user || null;
+    if (event === 'INITIAL_SESSION') {
+      if (!currentUser && !localStorage.getItem('gzclp_no_auth')) state.view = 'login';
+      else if (currentUser) await loadFromCloud();
+      render();
+    } else if (event === 'SIGNED_IN') {
+      await loadFromCloud();
+      if (state.view === 'login') state.view = 'home';
+      render();
+    } else if (event === 'SIGNED_OUT') {
+      state = defaultState();
+      state.view = 'login';
+      localStorage.removeItem('gzclp_no_auth');
+      render();
+    }
+  });
+}
 
 // ── HELPERS ───────────────────────────────────────────────
 function ensureExData(id, tier) {
@@ -545,6 +610,7 @@ function computeRecords(exId) {
 
 function render() {
   const app = document.getElementById('app');
+  if (state.view === 'login') { app.innerHTML = renderLogin(); return; }
   if (!state.initialized) { app.innerHTML = renderSetup(); return; }
   const views = { home:renderHome, workout:renderWorkout, summary:renderSummary, history:renderHistory, records:renderRecords, settings:renderSettings };
   app.innerHTML = (views[state.view]||renderHome)() + (!['workout','summary'].includes(state.view) ? renderNav() : '');
@@ -560,6 +626,23 @@ function renderNav() {
   };
   const labels = { home:'Home', history:'History', records:'Records', settings:'Settings' };
   return `<nav class="nav">${['home','history','records','settings'].map(n=>`<button class="nav-btn ${v===n?'active':''}" data-action="nav" data-view="${n}">${icons[n]}${labels[n]}</button>`).join('')}</nav>`;
+}
+
+function renderLogin() {
+  const isReg = loginMode === 'register';
+  return `<div style="padding:0 16px 20px">
+    <div class="setup-hero">
+      <div style="font-size:52px;margin-bottom:14px">🏋️</div>
+      <h1>GZCLP</h1>
+      <p>${isReg?'Create an account to back up your training data':'Sign in to sync your training data across devices'}</p>
+    </div>
+    <div class="field"><label class="label">Email</label><input class="input" id="auth-email" type="email" placeholder="you@example.com" inputmode="email" autocomplete="email"></div>
+    <div class="field"><label class="label">Password</label><input class="input" id="auth-pw" type="password" placeholder="Password" autocomplete="${isReg?'new-password':'current-password'}"></div>
+    <div id="auth-err" style="font-size:13px;margin-bottom:10px;min-height:16px"></div>
+    <button class="btn btn-primary" id="auth-btn" data-action="auth-submit">${isReg?'Create Account':'Sign In'}</button>
+    <button class="btn btn-secondary" data-action="auth-toggle" style="margin-top:8px">${isReg?'Already have an account? Sign in':'New here? Create account'}</button>
+    <div style="text-align:center;margin-top:18px"><button style="background:none;border:none;color:var(--muted);font-size:13px;cursor:pointer;font-family:inherit;padding:8px" data-action="auth-skip">Continue without signing in</button></div>
+  </div>`;
 }
 
 function renderSetup() {
@@ -1065,6 +1148,12 @@ function renderSettings() {
       <div class="settings-row"><div class="settings-label">Units</div><div class="toggle-row" style="width:120px"><button class="toggle-btn ${state.units==='kg'?'active':''}" data-action="set-units" data-units="kg">kg</button><button class="toggle-btn ${state.units==='lbs'?'active':''}" data-action="set-units" data-units="lbs">lbs</button></div></div>
       <div class="settings-row"><div class="settings-label">Name</div><input class="input" id="settings-name" value="${esc(state.name)}" placeholder="Athlete" style="width:150px;padding:8px 12px"></div>
     </div>
+    <div class="section-title">Data</div>
+    <div class="card" style="margin-top:8px">
+      ${sb ? `<div class="settings-row"><div><div class="settings-label">Cloud Sync</div><div style="font-size:12px;color:var(--muted);margin-top:2px">${currentUser?`Signed in as ${esc(currentUser.email)}`:'Not signed in'}</div></div>${currentUser?`<button class="btn btn-secondary" style="width:auto;padding:8px 14px;font-size:13px" data-action="sign-out">Sign Out</button>`:`<button class="btn btn-primary" style="width:auto;padding:8px 14px;font-size:13px" data-action="go-login">Sign In</button>`}</div>` : ''}
+      <div class="settings-row"><div class="settings-label">Export JSON</div><button class="btn btn-secondary" style="width:auto;padding:8px 14px;font-size:13px" data-action="export-data">Download</button></div>
+      <div class="settings-row"><div class="settings-label">Import JSON</div><label style="cursor:pointer"><span class="btn btn-secondary" style="display:inline-block;padding:8px 14px;font-size:13px;width:auto;cursor:pointer">Import</span><input type="file" accept=".json" id="import-file-input" style="display:none"></label></div>
+    </div>
     <div style="padding:16px;margin-top:8px"><button class="btn btn-danger" data-action="confirm-reset">Reset all data</button></div>
   </div>`;
 }
@@ -1072,7 +1161,7 @@ function renderSettings() {
 // ── EVENTS ────────────────────────────────────────────────
 document.getElementById('timer-skip').addEventListener('click', stopTimer);
 
-document.addEventListener('click', e => {
+document.addEventListener('click', async e => {
   const btn = e.target.closest('[data-action]'); if (!btn) return;
   const a = btn.dataset.action;
   if (a==='nav')         { state.view=btn.dataset.view; saveState(); render(); return; }
@@ -1146,10 +1235,74 @@ document.addEventListener('click', e => {
     if (confirm('Reset all training data? This cannot be undone.')) { state=defaultState(); saveState(); render(); }
     return;
   }
+
+  if (a==='auth-submit') {
+    const email = (document.getElementById('auth-email')?.value||'').trim();
+    const pw    = document.getElementById('auth-pw')?.value||'';
+    const errEl = document.getElementById('auth-err');
+    const authBtn = document.getElementById('auth-btn');
+    if (!email||!pw) { if(errEl){errEl.style.color='var(--red)';errEl.textContent='Please enter your email and password.';} return; }
+    if (authBtn) { authBtn.disabled=true; authBtn.textContent=loginMode==='register'?'Creating…':'Signing in…'; }
+    try {
+      let res;
+      if (loginMode==='register') res = await sb.auth.signUp({ email, password:pw });
+      else res = await sb.auth.signInWithPassword({ email, password:pw });
+      if (res.error) {
+        if (errEl) { errEl.style.color='var(--red)'; errEl.textContent=res.error.message; }
+        if (authBtn) { authBtn.disabled=false; authBtn.textContent=loginMode==='register'?'Create Account':'Sign In'; }
+      } else if (loginMode==='register' && !res.data.session) {
+        if (errEl) { errEl.style.color='var(--green)'; errEl.textContent='Account created! Check your email to confirm, then sign in.'; }
+        loginMode='login';
+        if (authBtn) { authBtn.disabled=false; authBtn.textContent='Sign In'; }
+      }
+    } catch(err) {
+      if (errEl) { errEl.style.color='var(--red)'; errEl.textContent='Network error. Please try again.'; }
+      if (authBtn) { authBtn.disabled=false; authBtn.textContent=loginMode==='register'?'Create Account':'Sign In'; }
+    }
+    return;
+  }
+
+  if (a==='auth-toggle') { loginMode=loginMode==='login'?'register':'login'; render(); return; }
+
+  if (a==='auth-skip') {
+    localStorage.setItem('gzclp_no_auth','1');
+    state.view='home'; render(); return;
+  }
+
+  if (a==='sign-out') {
+    if (confirm('Sign out? Your data stays on this device.')) await sb.auth.signOut();
+    return;
+  }
+
+  if (a==='go-login') { state.view='login'; render(); return; }
+
+  if (a==='export-data') {
+    const blob = new Blob([JSON.stringify(state, null, 2)], { type:'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href=url; link.download=`gzclp-backup-${new Date().toISOString().slice(0,10)}.json`;
+    document.body.appendChild(link); link.click(); document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+    showToast('Data exported ✓');
+    return;
+  }
 });
 
 document.addEventListener('change', e => {
   const el = e.target;
+  if (el.id === 'import-file-input') {
+    const file = el.files?.[0]; if (!file) return;
+    const reader = new FileReader();
+    reader.onload = ev => {
+      try {
+        const imported = JSON.parse(ev.target.result);
+        if (!imported.days || !Array.isArray(imported.sessions)) { showToast('Invalid backup file'); return; }
+        state = imported; saveState(); render();
+        showToast('Data imported ✓');
+      } catch(e) { showToast('Could not read file'); }
+    };
+    reader.readAsText(file); return;
+  }
   if (el.dataset.action === 'records-ex') { recordsExId = el.value; render(); return; }
   if (el.dataset.action !== 'day-sel') return;
   const dayIdx=parseInt(el.dataset.day), slot=el.dataset.slot, val=el.value;
@@ -1381,7 +1534,7 @@ function showToast(msg) {
 }
 
 // ── BOOT ──────────────────────────────────────────────────
-render();
+initAuth();
 </script>
 </body>
 </html>
