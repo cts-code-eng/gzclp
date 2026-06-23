@@ -233,6 +233,10 @@ body.timer-on { padding-top: 62px; }
 .summary-ex-sets { font-size: 13px; color: var(--muted); letter-spacing: .02em; margin-bottom: 4px; }
 .rec-badges { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .rec-badge { font-size: 12px; font-weight: 600; background: var(--card2); border-radius: 8px; padding: 4px 9px; }
+/* FREE WORKOUT */
+.free-set-row { display:flex; align-items:center; gap:8px; padding:9px 0; border-bottom:1px solid var(--border); }
+.free-set-row:last-of-type { border-bottom:none; }
+.swap-btn { background:none; border:1px solid var(--border); border-radius:8px; color:var(--muted); font-size:11px; padding:3px 8px; cursor:pointer; font-family:inherit; flex-shrink:0; line-height:1.4; }
 /* CLOUD */
 .cloud-loading { display:flex; flex-direction:column; align-items:center; justify-content:center; height:100vh; gap:14px; color:var(--muted); font-size:14px; }
 .spinner { width:30px; height:30px; border:3px solid var(--border); border-top-color:var(--accent); border-radius:50%; animation:spin .8s linear infinite; }
@@ -255,8 +259,8 @@ body.timer-on { padding-top: 62px; }
 <script>
 // ── SUPABASE CONFIG ───────────────────────────────────────
 // Fill in your values from: supabase.com → project → Settings → API
-const SUPABASE_URL      = 'https://hwkvuoygxzbvvoljqxqe.supabase.co';
-const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imh3a3Z1b3lneHpidnZvbGpxeHFlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODIyMDM4MzQsImV4cCI6MjA5Nzc3OTgzNH0.U1lCnK77ucrTd5MzGL6TPe9lldCVwRlX759bK02gpEQ';
+const SUPABASE_URL      = 'YOUR_SUPABASE_URL';
+const SUPABASE_ANON_KEY = 'YOUR_SUPABASE_ANON_KEY';
 let sb = null, currentUser = null, loginMode = 'login';
 try { if (typeof supabase!=='undefined' && SUPABASE_URL!=='YOUR_SUPABASE_URL') sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY); } catch(e) {}
 
@@ -469,6 +473,38 @@ function buildSession() {
 
 function startWorkout() { state.activeSession = buildSession(); state.view = 'workout'; saveState(); render(); }
 
+function startFreeWorkout() {
+  state.activeSession = {
+    workoutType: 'Free', isFree: true,
+    exercises: [{ uid: freeExUid++, exId: EXERCISES[0].id, name: EXERCISES[0].name,
+      sets: [{ weight:20, reps:null }, { weight:20, reps:null }, { weight:20, reps:null }] }]
+  };
+  state.view = 'workout'; saveState(); render();
+}
+
+function finishFreeWorkout() {
+  const s = state.activeSession; if (!s) return;
+  const freeRecs = s.exercises.map(ex => {
+    const valid = ex.sets.filter(sv => sv.reps !== null && sv.reps > 0 && (sv.weight||0) > 0);
+    if (!valid.length) return {};
+    const maxWt = Math.max(...valid.map(sv => sv.weight));
+    return snapshotRecords(ex.exId, maxWt, valid.map(sv => sv.reps));
+  });
+  state.sessions.unshift({
+    id: Date.now(), date: new Date().toISOString(), workoutType: 'Free', isFree: true,
+    t1: { exId:null, weight:0, stageLabel:'', passed:true, sets:[], records:{} },
+    t2: { exId:null, weight:0, stageLabel:'', passed:true, sets:[], records:{} },
+    t3s: [],
+    freeExercises: s.exercises.map((ex, i) => ({
+      exId: ex.exId, name: ex.name,
+      sets: ex.sets.filter(sv => sv.reps !== null),
+      records: freeRecs[i] || {}
+    }))
+  });
+  state.sessionCount++; state.activeSession = null; state.view = 'summary';
+  stopTimer(); saveState(); render();
+}
+
 function finishWorkout() {
   const s = state.activeSession; if (!s) return;
   // T1: pass = all non-amrap sets have reps >= required
@@ -552,6 +588,9 @@ function playBeep() {
 let settingsDayIdx = 0;
 let expandedSessionId = null;
 let recordsExId = null;
+let swappingTier = null;
+let swappingT3Idx = null;
+let freeExUid = 0;
 
 function calc1RM(weight, reps) {
   if (!weight || reps <= 0) return null;
@@ -563,8 +602,8 @@ function calc1RM(weight, reps) {
 function getExercisesWithHistory() {
   const seen = new Set();
   for (const s of state.sessions) {
-    seen.add(s.t1.exId); seen.add(s.t2.exId);
-    (s.t3s||[]).forEach(t => seen.add(t.exId));
+    if (s.isFree) { (s.freeExercises||[]).forEach(ex => seen.add(ex.exId)); }
+    else { if (s.t1?.exId) seen.add(s.t1.exId); if (s.t2?.exId) seen.add(s.t2.exId); (s.t3s||[]).forEach(t => seen.add(t.exId)); }
   }
   return EXERCISES.filter(e => seen.has(e.id));
 }
@@ -573,11 +612,21 @@ function getExerciseHistory(exId) {
   const rows = [];
   for (const s of state.sessions) {
     const d = new Date(s.date);
-    if (s.t1.exId === exId) rows.push({ date:d, weight:s.t1.weight, sets:s.t1.sets||[], tier:'t1', workoutType:s.workoutType });
-    if (s.t2.exId === exId) rows.push({ date:d, weight:s.t2.weight, sets:s.t2.sets||[], tier:'t2', workoutType:s.workoutType });
-    (s.t3s||[]).forEach(t3 => { if (t3.exId===exId) rows.push({ date:d, weight:t3.weight, sets:t3.sets||[null,null,t3.lastReps??null], tier:'t3', workoutType:s.workoutType }); });
+    if (s.isFree) {
+      (s.freeExercises||[]).forEach(ex => {
+        if (ex.exId !== exId) return;
+        const validSets = (ex.sets||[]).filter(sv => (sv.reps??sv) > 0);
+        if (!validSets.length) return;
+        const maxWt = Math.max(...validSets.map(sv => sv.weight||0));
+        rows.push({ date:d, weight:maxWt, sets:validSets.map(sv=>sv.reps??sv), tier:'free', workoutType:'Free' });
+      });
+    } else {
+      if (s.t1?.exId === exId) rows.push({ date:d, weight:s.t1.weight, sets:s.t1.sets||[], tier:'t1', workoutType:s.workoutType });
+      if (s.t2?.exId === exId) rows.push({ date:d, weight:s.t2.weight, sets:s.t2.sets||[], tier:'t2', workoutType:s.workoutType });
+      (s.t3s||[]).forEach(t3 => { if (t3.exId===exId) rows.push({ date:d, weight:t3.weight, sets:t3.sets||[null,null,t3.lastReps??null], tier:'t3', workoutType:s.workoutType }); });
+    }
   }
-  return rows; // newest first (sessions are unshifted)
+  return rows;
 }
 
 function computeRecords(exId) {
@@ -612,7 +661,7 @@ function render() {
   const app = document.getElementById('app');
   if (state.view === 'login') { app.innerHTML = renderLogin(); return; }
   if (!state.initialized) { app.innerHTML = renderSetup(); return; }
-  const views = { home:renderHome, workout:renderWorkout, summary:renderSummary, history:renderHistory, records:renderRecords, settings:renderSettings };
+  const views = { home:renderHome, workout:state.activeSession?.isFree?renderFreeWorkout:renderWorkout, summary:renderSummary, history:renderHistory, records:renderRecords, settings:renderSettings };
   app.innerHTML = (views[state.view]||renderHome)() + (!['workout','summary'].includes(state.view) ? renderNav() : '');
 }
 
@@ -673,7 +722,8 @@ function renderHome() {
   const hasActive = !!state.activeSession;
   const greeting = state.name ? `Hey, ${esc(state.name)}` : 'Ready to train';
   const total = state.sessions.length;
-  const passRate = total ? Math.round(state.sessions.filter(s=>s.t1.passed&&s.t2.passed).length/total*100) : null;
+  const gzclpSessions = state.sessions.filter(s=>!s.isFree);
+  const passRate = gzclpSessions.length ? Math.round(gzclpSessions.filter(s=>s.t1.passed&&s.t2.passed).length/gzclpSessions.length*100) : null;
 
   return `<div class="page">
     <div class="header"><div><h1>${greeting}</h1><div class="sub">Session ${state.sessionCount+1} · ${hasActive?'In progress':'Up next'}</div></div><div class="workout-badge">Day ${label}</div></div>
@@ -689,7 +739,9 @@ function renderHome() {
       }).join('')}
     </div>
     <div style="padding:16px 16px 0">
-      ${hasActive?`<button class="btn btn-primary" data-action="resume-workout">Resume Workout →</button><button class="btn btn-danger" data-action="discard-workout" style="margin-top:8px">Discard session</button>`:`<button class="btn btn-primary" data-action="start-workout">Start Workout →</button>`}
+      ${hasActive
+        ? `<button class="btn btn-primary" data-action="resume-workout">Resume Workout →</button><button class="btn btn-danger" data-action="discard-workout" style="margin-top:8px">Discard session</button>`
+        : `<button class="btn btn-primary" data-action="start-workout">Start Workout →</button><button class="btn btn-secondary" data-action="start-free-workout" style="margin-top:8px">Start Free Workout</button>`}
     </div>
     ${total>0?`<div class="section-title">Recent</div><div class="card" style="margin-top:8px">${state.sessions.slice(0,3).map(renderSessionRow).join('')}</div>`:''}
   </div>`;
@@ -697,16 +749,24 @@ function renderHome() {
 
 function renderSessionRow(s, expandable=false) {
   const d = new Date(s.date);
-  const t3summary = (s.t3s||[]).map(t=>`${esc(t.name)}${t.lastReps!=null?' '+t.lastReps+'r':''}`).join(', ');
   const isOpen = expandable && expandedSessionId === s.id;
   const chevron = expandable ? `<span class="session-chevron ${isOpen?'open':''}">›</span>` : '';
   const rowAction = expandable ? `data-action="toggle-session" data-sid="${s.id}"` : '';
+  let typeLabel, summaryLine;
+  if (s.isFree) {
+    typeLabel = 'Free Workout';
+    summaryLine = (s.freeExercises||[]).map(ex=>esc(EX[ex.exId]?.name??ex.name)).join(' · ') || 'No exercises logged';
+  } else {
+    typeLabel = `Day ${s.workoutType}`;
+    const t3summary = (s.t3s||[]).map(t=>`${esc(t.name)}${t.lastReps!=null?' '+t.lastReps+'r':''}`).join(', ');
+    summaryLine = `<span class="${s.t1.passed?'rpass':'rfail'}">${s.t1.passed?'✓':'✗'}</span> ${esc(EX[s.t1.exId]?.name??s.t1.exId)} ${fmt(s.t1.weight)}${state.units} · <span class="${s.t2.passed?'rpass':'rfail'}">${s.t2.passed?'✓':'✗'}</span> ${esc(EX[s.t2.exId]?.name??s.t2.exId)} ${fmt(s.t2.weight)}${state.units}${t3summary?` · ${t3summary}`:''}`;
+  }
   return `<div class="session-item">
     <div class="session-row" ${rowAction}>
       <div class="session-date-box"><div class="day">${d.getDate()}</div><div class="mon">${d.toLocaleString('en',{month:'short'})}</div></div>
       <div class="session-info">
-        <div class="session-type">Day ${s.workoutType}</div>
-        <div class="session-summary"><span class="${s.t1.passed?'rpass':'rfail'}">${s.t1.passed?'✓':'✗'}</span> ${esc(EX[s.t1.exId]?.name??s.t1.exId)} ${fmt(s.t1.weight)}${state.units} · <span class="${s.t2.passed?'rpass':'rfail'}">${s.t2.passed?'✓':'✗'}</span> ${esc(EX[s.t2.exId]?.name??s.t2.exId)} ${fmt(s.t2.weight)}${state.units}${t3summary?` · ${t3summary}`:''}</div>
+        <div class="session-type">${typeLabel}</div>
+        <div class="session-summary">${summaryLine}</div>
       </div>
       ${chevron}
     </div>
@@ -716,6 +776,33 @@ function renderSessionRow(s, expandable=false) {
 
 function renderSessionDetail(s) {
   const dateVal = s.date ? s.date.slice(0,10) : '';
+
+  if (s.isFree) {
+    const freeBlocks = (s.freeExercises||[]).map((ex, exI) => {
+      const exMeta = EX[ex.exId]; const isBW = !!exMeta?.bodyweight;
+      const setCircles = (ex.sets||[]).map((sv, si) => {
+        const reps = sv.reps ?? sv; const wt = sv.weight ?? 0;
+        return `<div class="hist-set">
+          <span class="hist-set-lbl">S${si+1}</span>
+          ${!isBW?`<div style="font-size:10px;color:var(--muted);margin-bottom:2px">${fmt(wt)}${state.units}</div>`:''}
+          <input class="hist-set-inp" type="number" min="0" value="${reps??''}" placeholder="—"
+            data-hist-sid="${s.id}" data-hist-freei="${exI}" data-hist-setidx="${si}" data-hist-free-reps>
+        </div>`;
+      }).join('');
+      return `<div class="hist-block">
+        <div class="hist-block-header"><span class="hist-ex-name">${esc(exMeta?.name??ex.name)}</span></div>
+        <div class="hist-sets">${setCircles}</div>
+        ${recBadgesHtml(ex.records)}
+      </div>`;
+    }).join('');
+    return `<div class="session-detail">
+      <div class="hist-meta"><span class="hist-label">Date</span>
+        <input class="hist-date-inp" type="date" value="${dateVal}" data-hist-sid="${s.id}" data-hist-date>
+      </div>
+      ${freeBlocks}
+      <button class="hist-del-btn" data-action="delete-session" data-sid="${s.id}">Delete session</button>
+    </div>`;
+  }
 
   const repsFromLabel = lbl => { const m=(lbl||'').match(/×(\d+)/); return m?parseInt(m[1]):1; };
 
@@ -803,6 +890,48 @@ function renderWorkout() {
   </div>`;
 }
 
+function renderFreeWorkout() {
+  const s = state.activeSession; if (!s) return renderHome();
+  const hasAny = s.exercises.some(ex => ex.sets.some(sv => sv.reps !== null));
+  return `<div class="page" style="padding-bottom:24px">
+    <div class="header">
+      <div><h1>Free Workout</h1><div class="sub">Session ${state.sessionCount+1}</div></div>
+      <button class="btn btn-primary" style="width:auto;padding:10px 18px;font-size:14px;${hasAny?'':'display:none'}" data-action="finish-free-workout">Save ✓</button>
+    </div>
+    ${s.exercises.map((ex,i)=>renderFreeExCard(ex,i,s)).join('')}
+    <div style="padding:12px 16px 0">
+      <button class="btn btn-secondary" data-action="free-add-ex">+ Add Exercise</button>
+    </div>
+    <div style="padding:8px 16px 0">
+      ${hasAny?`<button class="btn btn-primary" data-action="finish-free-workout">Complete Workout ✓</button>`:''}
+      <button class="btn btn-secondary" data-action="discard-workout" style="margin-top:8px;opacity:.5">Abandon workout</button>
+    </div>
+  </div>`;
+}
+
+function renderFreeExCard(ex, exIdx, s) {
+  const exMeta = EX[ex.exId]; const isBW = !!exMeta?.bodyweight;
+  const selOpts = EXERCISES.map(e=>`<option value="${e.id}" ${e.id===ex.exId?'selected':''}>${esc(e.name)}</option>`).join('');
+  const setRows = ex.sets.map((sv, si) => {
+    const logged = sv.reps !== null;
+    return `<div class="free-set-row">
+      <span style="font-size:11px;font-weight:700;color:var(--muted);min-width:22px;text-align:center">S${si+1}</span>
+      ${isBW?'':`<input class="warmup-inp" type="number" min="0" step="0.25" value="${fmt(sv.weight)}" style="width:50px;font-size:14px" data-free-wt data-exidx="${exIdx}" data-setidx="${si}"><span style="font-size:12px;color:var(--muted)">${state.units} ×</span>`}
+      <input class="warmup-inp" type="number" min="0" step="1" value="${sv.reps!==null?sv.reps:''}" placeholder="reps" style="width:44px;font-size:14px${logged?';color:var(--green)':''}" data-free-reps data-exidx="${exIdx}" data-setidx="${si}">
+      <span style="font-size:12px;color:var(--muted)">reps</span>
+      ${ex.sets.length>1?`<button data-action="free-del-set" data-exidx="${exIdx}" data-setidx="${si}" style="background:none;border:none;color:var(--muted);font-size:14px;cursor:pointer;margin-left:auto;padding:4px 8px">✕</button>`:''}
+    </div>`;
+  }).join('');
+  return `<div class="exercise-card" style="margin:12px 16px 0">
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+      <select class="day-sel" style="flex:1" data-free-ex-sel data-exidx="${exIdx}">${selOpts}</select>
+      ${s.exercises.length>1?`<button data-action="free-del-ex" data-exidx="${exIdx}" style="background:none;border:1px solid var(--red);border-radius:8px;color:var(--red);font-size:12px;padding:5px 10px;cursor:pointer;font-family:inherit;flex-shrink:0">Remove</button>`:''}
+    </div>
+    ${setRows}
+    <button data-action="free-add-set" data-exidx="${exIdx}" style="background:none;border:none;color:var(--accent);font-size:13px;font-weight:600;cursor:pointer;padding:10px 0 4px;font-family:inherit">+ Add set</button>
+  </div>`;
+}
+
 // Call BEFORE unshifting new session — compares against existing history only
 function snapshotRecords(exId, weight, sets) {
   const ex = EX[exId];
@@ -864,8 +993,13 @@ function renderExCard(tier, session) {
       <span class="set-tgt">${tgt}</span>
     </div>`;
   }).join('');
+  const isSwapping = swappingTier === tier;
+  const nameSection = isSwapping
+    ? `<select class="day-sel" style="flex:1;margin-right:8px" data-action="swap-ex-sel" data-tier="${tier}">${T12_EX.map(e=>`<option value="${e.id}" ${e.id===ex.exId?'selected':''}>${esc(e.name)}</option>`).join('')}</select><button data-action="cancel-swap" class="swap-btn">✕</button>`
+    : `<div class="exercise-name">${esc(exMeta?.name??ex.exId)}</div><span class="badge badge-${tier}">${tier.toUpperCase()}</span><button data-action="swap-ex" data-tier="${tier}" class="swap-btn" style="margin-left:6px">swap</button>`;
   return `<div class="exercise-card ${allLogged?'done':''}" data-ecard="${tier}">
-    <div class="exercise-header"><div><div class="exercise-name">${esc(exMeta?.name??ex.exId)}</div><span class="badge badge-${tier}">${tier.toUpperCase()}</span></div>
+    <div class="exercise-header">
+      <div style="flex:1;min-width:0;display:flex;align-items:center;flex-wrap:wrap;gap:6px">${nameSection}</div>
       <span class="ex-result ${anyLogged?(allPass?'rpass':'rfail'):''}" style="font-size:22px">${anyLogged?(allPass?'✓':'✗'):''}</span>
     </div>
     ${isBW?`<div class="exercise-weight"><span>Bodyweight</span></div>`:`<div style="display:flex;align-items:baseline;gap:6px;margin:8px 0 2px"><input class="ex-weight-input" type="number" min="0" step="0.25" data-wtsession data-tier="${tier}" value="${fmt(ex.weight)}"><span style="font-size:15px;color:var(--muted);font-weight:500">${state.units}</span></div>`}
@@ -900,8 +1034,13 @@ function renderT3Card(t3, idx) {
       <span class="set-tgt">${tgt}</span>
     </div>`;
   }).join('');
+  const isSwappingT3 = swappingT3Idx === idx;
+  const t3NameSection = isSwappingT3
+    ? `<select class="day-sel" style="flex:1;margin-right:8px" data-action="swap-ex-sel" data-tier="t3" data-t3idx="${idx}">${EXERCISES.map(e=>`<option value="${e.id}" ${e.id===t3.exId?'selected':''}>${esc(e.name)}</option>`).join('')}</select><button data-action="cancel-swap" class="swap-btn">✕</button>`
+    : `<div class="exercise-name">${esc(t3.name)}</div><span class="badge badge-t3">T3</span><button data-action="swap-t3" data-t3idx="${idx}" class="swap-btn" style="margin-left:6px">swap</button>`;
   return `<div class="exercise-card ${allLogged?'done':''}" data-ecard="t3-${idx}">
-    <div class="exercise-header"><div><div class="exercise-name">${esc(t3.name)}</div><span class="badge badge-t3">T3</span></div>
+    <div class="exercise-header">
+      <div style="flex:1;min-width:0;display:flex;align-items:center;flex-wrap:wrap;gap:6px">${t3NameSection}</div>
       <span class="ex-result" style="font-size:22px;color:var(--green)">${allLogged?'✓':''}</span>
     </div>
     ${isBW?`<div class="exercise-weight"><span>Bodyweight</span></div>`:`<div style="display:flex;align-items:baseline;gap:6px;margin:8px 0 2px"><input class="ex-weight-input" type="number" min="0" step="${isTB?5:0.25}" data-wtt3 data-t3idx="${idx}" value="${isTB?t3.weight:fmt(t3.weight)}"><span style="font-size:15px;color:var(--muted);font-weight:500">${isTB?'s':state.units}</span></div>`}
@@ -1042,6 +1181,29 @@ function renderSummary() {
   if (!s) return renderHome();
 
   const anyRec = r => r?.rm1 || r?.weight || r?.volume;
+
+  if (s.isFree) {
+    const hasAnyRecord = (s.freeExercises||[]).some(ex=>anyRec(ex.records));
+    const freeBlocks = (s.freeExercises||[]).map(ex => {
+      const exMeta = EX[ex.exId]; const isBW = !!exMeta?.bodyweight;
+      const setsDisp = (ex.sets||[]).map(sv => isBW?`${sv.reps}`:`${fmt(sv.weight??0)}×${sv.reps}`).join(' · ');
+      return `<div class="summary-ex">
+        <div class="summary-ex-header"><span class="summary-ex-name">${esc(exMeta?.name??ex.name)}</span></div>
+        ${setsDisp?`<div class="summary-ex-sets">${setsDisp}</div>`:''}
+        ${recBadgesHtml(ex.records)}
+      </div>`;
+    }).join('');
+    return `<div class="page" style="padding-bottom:24px">
+      <div class="summary-hero">
+        <div class="summary-icon">${hasAnyRecord?'🏆':'✅'}</div>
+        <h1 style="font-size:26px;font-weight:900;margin:0 0 4px">${hasAnyRecord?'New Records!':'Session Complete'}</h1>
+        <div class="sub">Free Workout · Session ${state.sessionCount}</div>
+      </div>
+      <div style="padding:0 16px">${freeBlocks}</div>
+      <div style="padding:20px 16px 0"><button class="btn btn-primary" data-action="nav" data-view="home">Back to Home</button></div>
+    </div>`;
+  }
+
   const hasAnyRecord = anyRec(s.t1.records) || anyRec(s.t2.records) || (s.t3s||[]).some(t=>anyRec(t.records));
 
   function exBlock(tier, ex) {
@@ -1203,7 +1365,37 @@ document.addEventListener('click', async e => {
     saveState(); render(); return;
   }
 
-  if (a==='start-workout')   { startWorkout(); return; }
+  if (a==='start-workout')      { startWorkout(); return; }
+  if (a==='start-free-workout') { startFreeWorkout(); return; }
+  if (a==='finish-free-workout'){ finishFreeWorkout(); return; }
+
+  if (a==='swap-ex')   { swappingTier=btn.dataset.tier; swappingT3Idx=null; render(); return; }
+  if (a==='swap-t3')   { swappingT3Idx=parseInt(btn.dataset.t3idx); swappingTier=null; render(); return; }
+  if (a==='cancel-swap'){ swappingTier=null; swappingT3Idx=null; render(); return; }
+
+  if (a==='free-add-ex') {
+    const ex0 = EXERCISES[0];
+    ensureExData(ex0.id,'t3');
+    const wt = state.exData[ex0.id]?.t3?.weight ?? ex0.wt?.t3 ?? 20;
+    state.activeSession.exercises.push({ uid:freeExUid++, exId:ex0.id, name:ex0.name,
+      sets:[{weight:wt,reps:null},{weight:wt,reps:null},{weight:wt,reps:null}] });
+    saveState(); render(); return;
+  }
+  if (a==='free-del-ex') {
+    state.activeSession.exercises.splice(parseInt(btn.dataset.exidx),1);
+    saveState(); render(); return;
+  }
+  if (a==='free-add-set') {
+    const ex = state.activeSession.exercises[parseInt(btn.dataset.exidx)];
+    const lastWt = ex.sets[ex.sets.length-1]?.weight ?? 20;
+    ex.sets.push({weight:lastWt,reps:null});
+    saveState(); render(); return;
+  }
+  if (a==='free-del-set') {
+    const ex = state.activeSession.exercises[parseInt(btn.dataset.exidx)];
+    if (ex.sets.length>1) ex.sets.splice(parseInt(btn.dataset.setidx),1);
+    saveState(); render(); return;
+  }
   if (a==='resume-workout')  { state.view='workout'; saveState(); render(); return; }
   if (a==='finish-workout')  { finishWorkout(); return; }
   if (a==='discard-workout') {
@@ -1290,6 +1482,37 @@ document.addEventListener('click', async e => {
 
 document.addEventListener('change', e => {
   const el = e.target;
+  if (el.dataset.action === 'swap-ex-sel') {
+    const tier = el.dataset.tier, t3idx = el.dataset.t3idx !== undefined ? parseInt(el.dataset.t3idx) : null;
+    const newExId = el.value; const newEx = EX[newExId]; if (!newEx) return;
+    if (tier === 't1' || tier === 't2') {
+      ensureExData(newExId, tier);
+      const saved = state.exData[newExId]?.[tier];
+      const s = state.activeSession[tier];
+      s.exId = newExId; s.weight = saved?.weight ?? newEx.wt?.[tier] ?? 40;
+      s.sets = Array(s.sets.length).fill(null);
+      if (tier==='t1') s.stage = T1_STAGES[saved?.stage??0];
+      else s.stage = T2_STAGES[saved?.stage??0];
+      s.stageIdx = saved?.stage ?? 0;
+    } else if (tier === 't3' && t3idx !== null) {
+      ensureExData(newExId, 't3');
+      const saved = state.exData[newExId]?.t3;
+      const t3 = state.activeSession.t3s[t3idx];
+      t3.exId=newExId; t3.name=newEx.name; t3.weight=saved?.weight??newEx.wt?.t3??20;
+      t3.timeBased=!!newEx.timeBased; t3.bodyweight=!!newEx.bodyweight; t3.sets=[null,null,null];
+    }
+    swappingTier=null; swappingT3Idx=null; saveState(); render(); return;
+  }
+
+  if ('freeExSel' in el.dataset) {
+    const exIdx = parseInt(el.dataset.exidx); const newEx = EX[el.value]; if (!newEx) return;
+    ensureExData(el.value,'t3');
+    const wt = state.exData[el.value]?.t3?.weight ?? newEx.wt?.t3 ?? 20;
+    const ex = state.activeSession.exercises[exIdx];
+    ex.exId=el.value; ex.name=newEx.name; ex.sets=ex.sets.map(sv=>({...sv,weight:wt}));
+    saveState(); render(); return;
+  }
+
   if (el.id === 'import-file-input') {
     const file = el.files?.[0]; if (!file) return;
     const reader = new FileReader();
@@ -1337,7 +1560,7 @@ function refreshCardResult(cardEl) {
 }
 
 function updateFinishBtns() {
-  const s = state.activeSession; if (!s) return;
+  const s = state.activeSession; if (!s || s.isFree) return;
   const hasAny = s.t1.sets.some(x=>x!==null)||s.t2.sets.some(x=>x!==null)||s.t3s.some(t3=>t3.sets.some(x=>x!==null));
   document.querySelectorAll('[data-action="finish-workout"]').forEach(b=>b.style.display=hasAny?'':'none');
 }
@@ -1386,6 +1609,24 @@ document.addEventListener('pointerdown', e => {
 document.addEventListener('input', e => {
   const el = e.target;
   if (el.id==='settings-name') { state.name=el.value.trim(); saveState(); }
+
+  if ('freeWt' in el.dataset && state.activeSession?.isFree) {
+    const val = parseFloat(el.value);
+    if (!isNaN(val) && val >= 0) {
+      state.activeSession.exercises[parseInt(el.dataset.exidx)].sets[parseInt(el.dataset.setidx)].weight = val;
+      saveState();
+    }
+    return;
+  }
+  if ('freeReps' in el.dataset && state.activeSession?.isFree) {
+    const val = el.value==='' ? null : Math.max(0, parseInt(el.value)||0);
+    state.activeSession.exercises[parseInt(el.dataset.exidx)].sets[parseInt(el.dataset.setidx)].reps = val;
+    el.style.color = val !== null && val > 0 ? 'var(--green)' : '';
+    saveState();
+    const hasAny = state.activeSession.exercises.some(ex=>ex.sets.some(sv=>sv.reps!==null));
+    document.querySelectorAll('[data-action="finish-free-workout"]').forEach(b=>b.style.display=hasAny?'':'none');
+    return;
+  }
 
   // Set rep entry (T1 / T2)
   if ('setinput' in el.dataset && state.activeSession) {
@@ -1471,6 +1712,13 @@ document.addEventListener('input', e => {
     const sid = parseInt(el.dataset.histSid);
     const sess = state.sessions.find(s => s.id === sid);
     if (!sess) return;
+
+    if ('histFreeReps' in el.dataset) {
+      const freei = parseInt(el.dataset.histFreei), si = parseInt(el.dataset.histSetidx);
+      const val = el.value==='' ? null : Math.max(0, parseInt(el.value)||0);
+      const ex = sess.freeExercises?.[freei]; if (ex?.sets?.[si]) { ex.sets[si].reps = val; saveState(); }
+      return;
+    }
 
     if ('histDate' in el.dataset && el.value) {
       const existing = new Date(sess.date);
