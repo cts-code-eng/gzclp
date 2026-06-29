@@ -495,9 +495,10 @@ function startFreeWorkout() {
 function finishFreeWorkout() {
   const s = state.activeSession; if (!s) return;
   const freeRecs = s.exercises.map(ex => {
-    const valid = ex.sets.filter(sv => sv.reps !== null && sv.reps > 0 && (sv.weight||0) > 0);
+    const isBW = !!EX[ex.exId]?.bodyweight;
+    const valid = ex.sets.filter(sv => sv.reps !== null && sv.reps > 0 && (isBW || (sv.weight||0) > 0));
     if (!valid.length) return {};
-    const maxWt = Math.max(...valid.map(sv => sv.weight));
+    const maxWt = isBW ? 0 : Math.max(...valid.map(sv => sv.weight));
     return snapshotRecords(ex.exId, maxWt, valid.map(sv => sv.reps));
   });
   state.sessions.unshift({
