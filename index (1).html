@@ -266,7 +266,7 @@ try { if (typeof supabase!=='undefined' && SUPABASE_URL!=='YOUR_SUPABASE_URL') s
 
 // ── EXERCISE LIBRARY ──────────────────────────────────────
 const EXERCISES = [
-  { id:'assistedpullup',  name:'Assisted Pull Up',           incKg:2.5,  incLbs:5,   wt:{t1:40,t2:30,t3:20} },
+  { id:'assistedpullup',  name:'Pull Up',                    incKg:2.5,  incLbs:5,   wt:{t1:0,t2:0,t3:0}, negativeOk:true },
   { id:'bench',           name:'Bench Press (Barbell)',       incKg:1.25, incLbs:2.5, wt:{t1:40,t2:32,t3:25}, barbell:true },
   { id:'bicepcurl',       name:'Bicep Curl (Dumbbell)',       incKg:1,    incLbs:2.5, wt:{t1:12,t2:10,t3:8}  },
   { id:'deadlift',        name:'Deadlift (Barbell)',          incKg:2.5,  incLbs:5,   wt:{t1:80,t2:60,t3:50}, barbell:true },
@@ -947,15 +947,25 @@ function renderFreeExCard(ex, exIdx, s) {
 // Call BEFORE unshifting new session — compares against existing history only
 function snapshotRecords(exId, weight, sets) {
   const ex = EX[exId];
-  if (!exId || !weight || ex?.bodyweight || ex?.timeBased) return {};
+  if (!exId || ex?.timeBased) return {};
   const valid = (sets||[]).filter(r => r !== null && r > 0);
   if (!valid.length) return {};
-  const cur1RM = Math.max(...valid.map(r => calc1RM(weight, r)).filter(Boolean));
-  const curVol = valid.reduce((a, r) => a + weight * r, 0);
   const hist = computeRecords(exId);
+  if (ex?.bodyweight) {
+    const maxReps = Math.max(...valid);
+    const totalReps = valid.reduce((a,b) => a+b, 0);
+    return {
+      rm1:    false,
+      weight: hist.rw === null || maxReps > hist.rw,
+      volume: hist.rv === null || totalReps > hist.rv,
+    };
+  }
+  if (weight == null) return {};
+  const cur1RM = Math.max(...valid.map(r => calc1RM(weight, r)).filter(Boolean));
+  const curVol = weight > 0 ? valid.reduce((a, r) => a + weight * r, 0) : 0;
   return {
     rm1:    !!(cur1RM && cur1RM > (hist.r1 || 0)),
-    weight: weight > (hist.rw || 0),
+    weight: hist.rw === null || weight > hist.rw,
     volume: !!(curVol && curVol > (hist.rv || 0)),
   };
 }
@@ -1014,7 +1024,7 @@ function renderExCard(tier, session) {
       <div style="flex:1;min-width:0;display:flex;align-items:center;flex-wrap:wrap;gap:6px">${nameSection}</div>
       <span class="ex-result ${anyLogged?(allPass?'rpass':'rfail'):''}" style="font-size:22px">${anyLogged?(allPass?'✓':'✗'):''}</span>
     </div>
-    ${isBW?`<div class="exercise-weight"><span>Bodyweight</span></div>`:`<div style="display:flex;align-items:baseline;gap:6px;margin:8px 0 2px"><input class="ex-weight-input" type="number" min="0" step="0.25" data-wtsession data-tier="${tier}" value="${fmt(ex.weight)}"><span style="font-size:15px;color:var(--muted);font-weight:500">${state.units}</span></div>`}
+    ${isBW?`<div class="exercise-weight"><span>Bodyweight</span></div>`:`<div style="display:flex;align-items:baseline;gap:6px;margin:8px 0 2px"><input class="ex-weight-input" type="number" ${exMeta?.negativeOk?'':'min="0" '}step="0.25" data-wtsession data-tier="${tier}" value="${fmt(ex.weight)}"><span style="font-size:15px;color:var(--muted);font-weight:500">${state.units}</span></div>`}
     ${(()=>{ const ws=computeWarmups(ex.weight,ex.exId); return ws.length?`<div class="warmup-section"><div class="warmup-hdr">Warm-up</div>${ws.map(w=>`<div class="warmup-row" data-action="toggle-warmup"><span class="warmup-pct">${w.pct}%</span><input class="warmup-inp" type="number" min="0" step="1" value="${fmt(w.weight)}" style="width:44px"><span class="warmup-unit">${state.units} ×</span><input class="warmup-inp" type="number" min="1" step="1" value="${w.reps}" style="width:28px"><span class="warmup-unit">reps</span><span class="warmup-tick">○</span></div>`).join('')}</div>`:''; })()}
     <div class="exercise-scheme">${stage.label} · tap to confirm · tap again to edit</div>
     <div class="sets-grid">${sets}</div>
@@ -1424,7 +1434,7 @@ document.addEventListener('click', async e => {
     const parsed = parseFloat(delta);
     const ex = EX[exId];
     if (ex?.timeBased) d.weight = Math.max(0, Math.round((d.weight+parsed)/5)*5);
-    else if (!ex?.bodyweight) d.weight = Math.max(0, snapWeight(d.weight+parsed));
+    else if (!ex?.bodyweight) d.weight = ex?.negativeOk ? snapWeight(d.weight+parsed) : Math.max(0, snapWeight(d.weight+parsed));
     saveState(); render(); return;
   }
 
@@ -1624,7 +1634,8 @@ document.addEventListener('input', e => {
 
   if ('freeWt' in el.dataset && state.activeSession?.isFree) {
     const val = parseFloat(el.value);
-    if (!isNaN(val) && val >= 0) {
+    const freeExId = state.activeSession.exercises[parseInt(el.dataset.exidx)]?.exId;
+    if (!isNaN(val) && (val >= 0 || EX[freeExId]?.negativeOk)) {
       state.activeSession.exercises[parseInt(el.dataset.exidx)].sets[parseInt(el.dataset.setidx)].weight = val;
       saveState();
     }
@@ -1691,11 +1702,12 @@ document.addEventListener('input', e => {
   // Direct weight entry — save without re-render so focus is preserved
   if ('wtsession' in el.dataset && state.activeSession) {
     const val = parseFloat(el.value);
-    if (!isNaN(val) && val >= 0) {
-      const tier = el.dataset.tier;
+    const tier = el.dataset.tier;
+    const exId = state.activeSession[tier]?.exId;
+    if (!isNaN(val) && (val >= 0 || EX[exId]?.negativeOk)) {
       state.activeSession[tier].weight = val;
-      ensureExData(state.activeSession[tier].exId, tier);
-      state.exData[state.activeSession[tier].exId][tier].weight = val;
+      ensureExData(exId, tier);
+      state.exData[exId][tier].weight = val;
       saveState();
     }
   }
